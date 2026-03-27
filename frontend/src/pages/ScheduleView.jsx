@@ -11,16 +11,22 @@ const DAY_NAMES = ['Lunes', 'Martes', 'Miercoles', 'Jueves', 'Viernes']
 // day_of_week comes as int from API: 0=Mon, 1=Tue, etc.
 
 const CONFLICT_LABELS = {
-  teacher_double_booking: 'Docente asignado a otra sección al mismo tiempo',
-  section_double_booking: 'Sección con dos materias en el mismo bloque',
-  teacher_max_hours_exceeded: 'Docente excede su carga horaria máxima',
-  subject_repeated_same_day: 'Materia repetida en el mismo día',
-  len_mat_first_slot: 'Lenguaje o Matemática en la primera hora',
+  teacher_double_booking: { text: 'Docente asignado a otra sección al mismo tiempo', severity: 'error' },
+  section_double_booking: { text: 'Sección con dos materias en el mismo bloque', severity: 'error' },
+  subject_repeated_same_day: { text: 'Materia repetida en el mismo día', severity: 'error' },
+  teacher_max_hours_exceeded: { text: 'Docente excede su carga horaria máxima', severity: 'warning' },
+  len_mat_first_slot: { text: 'Lenguaje o Matemática en la primera hora (no recomendado)', severity: 'warning' },
+}
+
+function conflictSeverity(flags) {
+  if (!flags || flags.length === 0) return null
+  const hasError = flags.some(f => (CONFLICT_LABELS[f]?.severity || 'error') === 'error')
+  return hasError ? 'error' : 'warning'
 }
 
 function conflictText(flags) {
   if (!flags || flags.length === 0) return ''
-  return flags.map(f => CONFLICT_LABELS[f] || f).join('\n')
+  return flags.map(f => CONFLICT_LABELS[f]?.text || f).join('\n')
 }
 
 const SUBJECT_COLORS = {
@@ -261,6 +267,8 @@ function ScheduleGrid({ entries, viewMode, projectId, versionId, onEntriesChange
                 }
                 const bg = subjectColor(entry.subject_code, entry.subject_color)
                 const hasConflict = entry.conflict_flags && entry.conflict_flags.length > 0
+                const severity = hasConflict ? conflictSeverity(entry.conflict_flags) : null
+                const borderColor = severity === 'error' ? '#E74C3C' : severity === 'warning' ? '#F39C12' : null
                 const isDragged = draggedEntryId === entry.id
                 const canDrag = isDragEnabled && !entry.is_locked
                 const secondLine = viewMode === 'teacher'
@@ -286,14 +294,14 @@ function ScheduleGrid({ entries, viewMode, projectId, versionId, onEntriesChange
                         background: bg, color: '#fff', borderRadius: 6, padding: '0.35rem 0.25rem',
                         fontSize: '0.78rem', lineHeight: 1.3, position: 'relative', minHeight: 38,
                         display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center',
-                        border: hasConflict ? '2px solid #E74C3C' : '1px solid rgba(0,0,0,0.1)',
-                        boxShadow: hasConflict ? '0 0 6px rgba(231,76,60,0.4)' : 'none',
+                        border: borderColor ? `2px solid ${borderColor}` : '1px solid rgba(0,0,0,0.1)',
+                        boxShadow: borderColor ? `0 0 6px ${borderColor}66` : 'none',
                         opacity: isDragged ? 0.4 : (isMoving ? 0.6 : 1),
                         cursor: canDrag ? 'grab' : 'default',
                         transition: 'opacity 0.2s ease',
                     }}>
                       {hasConflict && (
-                        <span style={{ position: 'absolute', top: -2, right: -2, fontSize: '0.6rem', background: '#E74C3C', color: '#fff', borderRadius: '50%', width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, cursor: 'help', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} title={conflictText(entry.conflict_flags)}>!</span>
+                        <span style={{ position: 'absolute', top: -2, right: -2, fontSize: '0.6rem', background: borderColor, color: '#fff', borderRadius: '50%', width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, cursor: 'help', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} title={conflictText(entry.conflict_flags)}>{severity === 'warning' ? '⚠' : '!'}</span>
                       )}
                       {entry.is_locked && (
                         <span style={{ position: 'absolute', top: 1, left: 3, fontSize: '0.6rem' }} title="Bloqueado">L</span>
