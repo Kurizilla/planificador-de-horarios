@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import {
   listScheduleVersions, getScheduleEntries, generateSchedule,
   validateSchedule, validateAndApprove, listSections, getProject,
-  exportScheduleExcel,
+  exportScheduleExcel, listTimeSlots, moveScheduleEntry,
 } from '../api'
 import ScheduleAssistantWidget from '../components/ScheduleAssistantWidget'
 
@@ -66,7 +66,26 @@ function StatCard({ label, value, color }) {
   )
 }
 
-function ScheduleGrid({ entries, viewMode }) {
+function ScheduleGrid({ entries, viewMode, projectId, versionId, onEntriesChanged, allTimeSlots }) {
+  const [draggedEntryId, setDraggedEntryId] = useState(null)
+  const [dragOverCell, setDragOverCell] = useState(null)
+  const [movingCell, setMovingCell] = useState(null)
+  const [justDroppedCells, setJustDroppedCells] = useState(new Set())
+
+  const isDragEnabled = viewMode === 'section' && !!projectId && !!versionId && !!onEntriesChanged
+
+  // Build a lookup: (day_of_week, slot_order) -> time_slot_id from allTimeSlots
+  const timeSlotLookup = useMemo(() => {
+    const lookup = {}
+    if (allTimeSlots) {
+      allTimeSlots.forEach(ts => {
+        const key = `${ts.start_time}-${ts.end_time}-${ts.day_of_week}`
+        lookup[key] = ts.id
+      })
+    }
+    return lookup
+  }, [allTimeSlots])
+
   const { slotLabels, grid } = useMemo(() => {
     if (!entries || entries.length === 0) return { slotLabels: [], grid: {} }
 
@@ -95,6 +114,79 @@ function ScheduleGrid({ entries, viewMode }) {
     return { slotLabels: labels, grid: g }
   }, [entries])
 
+  const handleDragStart = useCallback((ev, entry) => {
+    if (!isDragEnabled || entry.is_locked) return
+    ev.dataTransfer.setData('text/plain', JSON.stringify({
+      entryId: entry.id,
+      timeSlotId: entry.time_slot_id,
+    }))
+    ev.dataTransfer.effectAllowed = 'move'
+    setDraggedEntryId(entry.id)
+  }, [isDragEnabled])
+
+  const handleDragEnd = useCallback(() => {
+    setDraggedEntryId(null)
+    setDragOverCell(null)
+  }, [])
+
+  const handleDragOver = useCallback((ev) => {
+    ev.preventDefault()
+    ev.dataTransfer.dropEffect = 'move'
+  }, [])
+
+  const handleDragEnter = useCallback((cellKey) => {
+    setDragOverCell(cellKey)
+  }, [])
+
+  const handleDragLeave = useCallback((ev, cellKey) => {
+    // Only clear if leaving the cell entirely (not entering a child)
+    if (!ev.currentTarget.contains(ev.relatedTarget)) {
+      setDragOverCell(prev => prev === cellKey ? null : prev)
+    }
+  }, [])
+
+  const handleDrop = useCallback(async (ev, slotKey, dayIdx) => {
+    ev.preventDefault()
+    setDragOverCell(null)
+    setDraggedEntryId(null)
+
+    if (!isDragEnabled) return
+
+    let data
+    try {
+      data = JSON.parse(ev.dataTransfer.getData('text/plain'))
+    } catch { return }
+
+    // Find the target time_slot_id
+    const targetEntry = grid[slotKey]?.[dayIdx]
+    let targetTimeSlotId = targetEntry?.time_slot_id
+
+    // If empty cell, look up from allTimeSlots
+    if (!targetTimeSlotId) {
+      const lookupKey = `${slotKey}-${dayIdx}`
+      targetTimeSlotId = timeSlotLookup[lookupKey]
+    }
+
+    if (!targetTimeSlotId || targetTimeSlotId === data.timeSlotId) return
+
+    // Don't drop onto a locked entry
+    if (targetEntry?.is_locked) return
+
+    const cellKey = `${slotKey}-${dayIdx}`
+    setMovingCell(cellKey)
+
+    try {
+      await moveScheduleEntry(projectId, versionId, data.entryId, targetTimeSlotId)
+      setJustDroppedCells(new Set([cellKey]))
+      setTimeout(() => setJustDroppedCells(new Set()), 1500)
+      if (onEntriesChanged) onEntriesChanged()
+    } catch (err) {
+      console.error('Move failed:', err)
+    } finally {
+      setMovingCell(null)
+    }
+  }, [isDragEnabled, grid, timeSlotLookup, projectId, versionId, onEntriesChanged])
+
   if (slotLabels.length === 0) {
     return <p style={{ color: 'var(--color-text-muted)', padding: '2rem', textAlign: 'center' }}>No hay bloques horarios para mostrar.</p>
   }
@@ -118,28 +210,74 @@ function ScheduleGrid({ entries, viewMode }) {
               </td>
               {DAY_NAMES.map((_, dayIdx) => {
                 const entry = grid[slot.key]?.[dayIdx]
+                const cellKey = `${slot.key}-${dayIdx}`
+                const isDragOver = dragOverCell === cellKey
+                const isMoving = movingCell === cellKey
+                const isJustDropped = justDroppedCells.has(cellKey)
+
+                const tdDropStyles = isDragEnabled && isDragOver ? {
+                  outline: '2px dashed #3498DB',
+                  outlineOffset: -2,
+                  background: 'rgba(52, 152, 219, 0.08)',
+                } : {}
+
+                const tdSuccessStyles = isJustDropped ? {
+                  outline: '2px solid #2ECC71',
+                  outlineOffset: -2,
+                  transition: 'outline-color 1.5s ease',
+                } : {}
+
                 if (!entry) {
                   return (
-                    <td key={dayIdx} style={{ padding: '0.4rem 0.3rem', borderBottom: '1px solid var(--color-border)', textAlign: 'center', background: 'var(--color-bg-subtle)', color: 'var(--color-text-muted)' }}>
-                      —
+                    <td
+                      key={dayIdx}
+                      onDragOver={isDragEnabled ? handleDragOver : undefined}
+                      onDragEnter={isDragEnabled ? () => handleDragEnter(cellKey) : undefined}
+                      onDragLeave={isDragEnabled ? (ev) => handleDragLeave(ev, cellKey) : undefined}
+                      onDrop={isDragEnabled ? (ev) => handleDrop(ev, slot.key, dayIdx) : undefined}
+                      style={{
+                        padding: '0.4rem 0.3rem', borderBottom: '1px solid var(--color-border)',
+                        textAlign: 'center', background: 'var(--color-bg-subtle)',
+                        color: 'var(--color-text-muted)',
+                        ...tdDropStyles, ...tdSuccessStyles,
+                      }}
+                    >
+                      {isMoving ? '...' : '\u2014'}
                     </td>
                   )
                 }
                 const bg = subjectColor(entry.subject_code, entry.subject_color)
                 const hasConflict = entry.conflict_flags && entry.conflict_flags.length > 0
+                const isDragged = draggedEntryId === entry.id
+                const canDrag = isDragEnabled && !entry.is_locked
                 const secondLine = viewMode === 'teacher'
                   ? (entry.section_code || entry.section_grade || '')
                   : abbreviate(entry.teacher_name)
                 return (
-                  <td key={dayIdx} style={{
-                    padding: '0.3rem', borderBottom: '1px solid var(--color-border)', textAlign: 'center',
-                  }}>
-                    <div style={{
-                      background: bg, color: '#fff', borderRadius: 6, padding: '0.35rem 0.25rem',
-                      fontSize: '0.78rem', lineHeight: 1.3, position: 'relative', minHeight: 38,
-                      display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center',
-                      border: hasConflict ? '2px solid #E74C3C' : '1px solid rgba(0,0,0,0.1)',
-                      boxShadow: hasConflict ? '0 0 6px rgba(231,76,60,0.4)' : 'none',
+                  <td
+                    key={dayIdx}
+                    onDragOver={isDragEnabled ? handleDragOver : undefined}
+                    onDragEnter={isDragEnabled ? () => handleDragEnter(cellKey) : undefined}
+                    onDragLeave={isDragEnabled ? (ev) => handleDragLeave(ev, cellKey) : undefined}
+                    onDrop={isDragEnabled ? (ev) => handleDrop(ev, slot.key, dayIdx) : undefined}
+                    style={{
+                      padding: '0.3rem', borderBottom: '1px solid var(--color-border)', textAlign: 'center',
+                      ...tdDropStyles, ...tdSuccessStyles,
+                    }}
+                  >
+                    <div
+                      draggable={canDrag}
+                      onDragStart={canDrag ? (ev) => handleDragStart(ev, entry) : undefined}
+                      onDragEnd={canDrag ? handleDragEnd : undefined}
+                      style={{
+                        background: bg, color: '#fff', borderRadius: 6, padding: '0.35rem 0.25rem',
+                        fontSize: '0.78rem', lineHeight: 1.3, position: 'relative', minHeight: 38,
+                        display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center',
+                        border: hasConflict ? '2px solid #E74C3C' : '1px solid rgba(0,0,0,0.1)',
+                        boxShadow: hasConflict ? '0 0 6px rgba(231,76,60,0.4)' : 'none',
+                        opacity: isDragged ? 0.4 : (isMoving ? 0.6 : 1),
+                        cursor: canDrag ? 'grab' : 'default',
+                        transition: 'opacity 0.2s ease',
                     }}>
                       {hasConflict && (
                         <span style={{ position: 'absolute', top: 1, right: 3, fontSize: '0.65rem' }} title={entry.conflict_flags.join(', ')}>!</span>
@@ -211,6 +349,7 @@ export default function ScheduleView() {
   const [validationResult, setValidationResult] = useState(null)
   const [exporting, setExporting] = useState(false)
   const [error, setError] = useState('')
+  const [allTimeSlots, setAllTimeSlots] = useState([])
 
   // Load project info
   useEffect(() => {
@@ -240,6 +379,16 @@ export default function ScheduleView() {
     }
   }, [projectId, shift])
 
+  // Load time slots for drag-and-drop (empty cell targets)
+  const loadTimeSlots = useCallback(async () => {
+    try {
+      const ts = await listTimeSlots(projectId, shift)
+      setAllTimeSlots(Array.isArray(ts) ? ts : [])
+    } catch {
+      setAllTimeSlots([])
+    }
+  }, [projectId, shift])
+
   // Load entries
   const loadEntries = useCallback(async (versionId, sectionId) => {
     if (!versionId) { setEntries([]); return }
@@ -254,7 +403,7 @@ export default function ScheduleView() {
   // Initial load
   useEffect(() => {
     setLoading(true)
-    Promise.all([loadVersions(), loadSections()]).then(([vList]) => {
+    Promise.all([loadVersions(), loadSections(), loadTimeSlots()]).then(([vList]) => {
       const shiftVersions = vList.filter(v => v.shift === shift)
       if (shiftVersions.length > 0) {
         const latest = shiftVersions[shiftVersions.length - 1]
@@ -263,7 +412,7 @@ export default function ScheduleView() {
         setSelectedVersion(null)
       }
     }).finally(() => setLoading(false))
-  }, [loadVersions, loadSections, shift])
+  }, [loadVersions, loadSections, loadTimeSlots, shift])
 
   // Load entries when version or section changes
   useEffect(() => {
@@ -445,13 +594,13 @@ export default function ScheduleView() {
           {/* Grid */}
           {viewMode === 'section' ? (
             selectedSection ? (
-              <ScheduleGrid entries={entries} viewMode={viewMode} />
+              <ScheduleGrid entries={entries} viewMode={viewMode} projectId={projectId} versionId={selectedVersion} onEntriesChanged={() => loadEntries(selectedVersion, selectedSection)} allTimeSlots={allTimeSlots} />
             ) : (
               /* Show grids for each section */
               filteredSections.length > 0 ? (
-                <SectionGrids sections={filteredSections} projectId={projectId} versionId={selectedVersion} viewMode={viewMode} />
+                <SectionGrids sections={filteredSections} projectId={projectId} versionId={selectedVersion} viewMode={viewMode} onEntriesChanged={() => loadEntries(selectedVersion, selectedSection)} allTimeSlots={allTimeSlots} />
               ) : (
-                <ScheduleGrid entries={entries} viewMode={viewMode} />
+                <ScheduleGrid entries={entries} viewMode={viewMode} projectId={projectId} versionId={selectedVersion} onEntriesChanged={() => loadEntries(selectedVersion, selectedSection)} allTimeSlots={allTimeSlots} />
               )
             )
           ) : (
@@ -522,11 +671,11 @@ export default function ScheduleView() {
 }
 
 /* Sub-component: loads entries per section and renders individual grids */
-function SectionGrids({ sections, projectId, versionId, viewMode }) {
+function SectionGrids({ sections, projectId, versionId, viewMode, onEntriesChanged, allTimeSlots }) {
   const [sectionEntries, setSectionEntries] = useState({})
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
+  const reloadAll = useCallback(() => {
     setLoading(true)
     Promise.all(
       sections.map(s =>
@@ -540,6 +689,10 @@ function SectionGrids({ sections, projectId, versionId, viewMode }) {
       setSectionEntries(map)
     }).finally(() => setLoading(false))
   }, [sections, projectId, versionId])
+
+  useEffect(() => {
+    reloadAll()
+  }, [reloadAll])
 
   if (loading) {
     return <p style={{ color: 'var(--color-text-muted)', padding: '1rem', textAlign: 'center' }}>Cargando secciones...</p>
@@ -556,7 +709,7 @@ function SectionGrids({ sections, projectId, versionId, viewMode }) {
       {populated.map(s => (
         <div key={s.id}>
           <h3 style={{ margin: '0 0 0.5rem', fontSize: '1rem' }}>{s.grade} - {s.code || s.name} {s.student_count ? `(${s.student_count} est.)` : ''}</h3>
-          <ScheduleGrid entries={sectionEntries[s.id]} viewMode={viewMode} />
+          <ScheduleGrid entries={sectionEntries[s.id]} viewMode={viewMode} projectId={projectId} versionId={versionId} onEntriesChanged={() => { reloadAll(); if (onEntriesChanged) onEntriesChanged() }} allTimeSlots={allTimeSlots} />
         </div>
       ))}
     </div>

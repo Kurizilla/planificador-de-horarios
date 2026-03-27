@@ -41,6 +41,7 @@ from app.schemas.schedule import (
     ScheduleChangeRead,
     ScheduleEntryRead,
     ScheduleVersionRead,
+    SwapMoveResult,
     ValidationResult,
 )
 from app.services.schedule_engine import (
@@ -321,6 +322,291 @@ def get_schedule_entries(
         ))
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+def _run_conflict_detection_for_version(version: ScheduleVersion, db: Session) -> tuple[list, list]:
+    """Load related data and run detect_conflicts for a version.
+
+    Returns (all_conflicts, entries) where entries are eagerly loaded
+    with their relationships.
+    """
+    from sqlalchemy.orm import joinedload
+
+    project_id = version.project_id
+    shift = version.shift
+
+    entries = (
+        db.query(ScheduleEntry)
+        .options(
+            joinedload(ScheduleEntry.subject),
+            joinedload(ScheduleEntry.teacher),
+            joinedload(ScheduleEntry.section),
+            joinedload(ScheduleEntry.time_slot),
+        )
+        .filter(ScheduleEntry.schedule_version_id == version.id)
+        .all()
+    )
+
+    teachers = (
+        db.query(Teacher)
+        .filter(
+            Teacher.project_id == project_id,
+            (Teacher.shift == shift) | (Teacher.shift.is_(None)),
+        )
+        .all()
+    )
+    sections = (
+        db.query(Section)
+        .filter(Section.project_id == project_id, Section.shift == shift)
+        .all()
+    )
+    time_slots = (
+        db.query(TimeSlot)
+        .filter(
+            TimeSlot.project_id == project_id,
+            TimeSlot.shift == shift,
+            TimeSlot.is_break == False,  # noqa: E712
+        )
+        .all()
+    )
+    business_rules = (
+        db.query(BusinessRule)
+        .filter(BusinessRule.project_id == project_id, BusinessRule.is_active == True)  # noqa: E712
+        .all()
+    )
+
+    all_conflicts = detect_conflicts(entries, teachers, sections, time_slots, business_rules)
+    return all_conflicts, entries
+
+
+def _update_version_and_entry_conflicts(
+    version: ScheduleVersion,
+    all_conflicts: list[ConflictDetail],
+    entries: list[ScheduleEntry],
+    db: Session,
+) -> tuple[list[ConflictDetail], list[ConflictDetail]]:
+    """Update version counts and entry-level conflict_flags. Returns (errors, warnings)."""
+    errors = [c for c in all_conflicts if c.severity == "error"]
+    warnings = [c for c in all_conflicts if c.severity == "warning"]
+
+    version.conflicts_count = len(errors)
+    version.warnings_count = len(warnings)
+
+    # Build per-entry conflict flags
+    entry_conflicts: dict[UUID, list[str]] = {}
+    for cd in all_conflicts:
+        for eid in cd.affected_entry_ids:
+            entry_conflicts.setdefault(eid, []).append(cd.type)
+
+    for entry in entries:
+        flags = entry_conflicts.get(entry.id)
+        entry.conflict_flags = flags if flags else None
+
+    return errors, warnings
+
+
+# ---------------------------------------------------------------------------
+# Swap / Move
+# ---------------------------------------------------------------------------
+
+def swap_entries(
+    version_id: UUID,
+    entry_id_a: UUID,
+    entry_id_b: UUID,
+    db: Session,
+    user_id: UUID,
+) -> SwapMoveResult:
+    """Swap the time slots of two entries within the same version."""
+    entry_a = db.query(ScheduleEntry).filter(ScheduleEntry.id == entry_id_a).first()
+    entry_b = db.query(ScheduleEntry).filter(ScheduleEntry.id == entry_id_b).first()
+
+    if not entry_a or not entry_b:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="One or both entries not found")
+
+    if entry_a.schedule_version_id != version_id or entry_b.schedule_version_id != version_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Both entries must belong to the specified schedule version",
+        )
+
+    if entry_a.is_locked or entry_b.is_locked:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot swap locked entries",
+        )
+
+    # Swap time_slot_ids using raw SQL to avoid UNIQUE constraint collision
+    old_slot_a = entry_a.time_slot_id
+    old_slot_b = entry_b.time_slot_id
+
+    from sqlalchemy import text
+    db.execute(
+        text("UPDATE schedule_entries SET time_slot_id = :slot WHERE id = :eid"),
+        {"slot": str(old_slot_b), "eid": str(entry_a.id)},
+    )
+    db.execute(
+        text("UPDATE schedule_entries SET time_slot_id = :slot WHERE id = :eid"),
+        {"slot": str(old_slot_a), "eid": str(entry_b.id)},
+    )
+    # Refresh ORM objects
+    db.expire(entry_a)
+    db.expire(entry_b)
+
+    # Record changes
+    change_a = ScheduleChange(
+        schedule_version_id=version_id,
+        change_type=ChangeType.SWAP,
+        entry_id=entry_a.id,
+        previous_values={"time_slot_id": str(old_slot_a)},
+        new_values={"time_slot_id": str(old_slot_b)},
+        source="manual",
+        description=f"Swapped entry time slot (part of swap with {entry_id_b})",
+        created_by_id=user_id,
+    )
+    change_b = ScheduleChange(
+        schedule_version_id=version_id,
+        change_type=ChangeType.SWAP,
+        entry_id=entry_b.id,
+        previous_values={"time_slot_id": str(old_slot_b)},
+        new_values={"time_slot_id": str(old_slot_a)},
+        source="manual",
+        description=f"Swapped entry time slot (part of swap with {entry_id_a})",
+        created_by_id=user_id,
+    )
+    db.add(change_a)
+    db.add(change_b)
+    db.flush()
+
+    # Re-run conflict detection
+    version = db.query(ScheduleVersion).filter(ScheduleVersion.id == version_id).first()
+    all_conflicts, entries = _run_conflict_detection_for_version(version, db)
+    errors, warnings = _update_version_and_entry_conflicts(version, all_conflicts, entries, db)
+
+    db.commit()
+
+    # Build response entries
+    entry_reads = get_schedule_entries(version_id=version_id, db=db)
+    return SwapMoveResult(entries=entry_reads, conflicts=errors, warnings=warnings)
+
+
+def move_entry_to_slot(
+    version_id: UUID,
+    entry_id: UUID,
+    target_time_slot_id: UUID,
+    db: Session,
+    user_id: UUID,
+) -> SwapMoveResult:
+    """Move an entry to a different time slot. If the target slot has an entry for the
+    same section in this version, swap them."""
+    entry = db.query(ScheduleEntry).filter(ScheduleEntry.id == entry_id).first()
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    if entry.schedule_version_id != version_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Entry does not belong to the specified schedule version",
+        )
+
+    if entry.is_locked:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot move a locked entry",
+        )
+
+    old_slot = entry.time_slot_id
+
+    if old_slot == target_time_slot_id:
+        # No-op: already in the target slot
+        entry_reads = get_schedule_entries(version_id=version_id, db=db)
+        return SwapMoveResult(entries=entry_reads, conflicts=[], warnings=[])
+
+    # Check if there is already an entry for the same section in the target slot
+    existing = (
+        db.query(ScheduleEntry)
+        .filter(
+            ScheduleEntry.schedule_version_id == version_id,
+            ScheduleEntry.section_id == entry.section_id,
+            ScheduleEntry.time_slot_id == target_time_slot_id,
+        )
+        .first()
+    )
+
+    if existing:
+        # Swap both entries
+        if existing.is_locked:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot swap with a locked entry in the target slot",
+            )
+
+        # Use raw SQL to avoid UNIQUE constraint collision during swap
+        from sqlalchemy import text
+        db.execute(
+            text("UPDATE schedule_entries SET time_slot_id = :slot WHERE id = :eid"),
+            {"slot": str(old_slot), "eid": str(existing.id)},
+        )
+        db.execute(
+            text("UPDATE schedule_entries SET time_slot_id = :slot WHERE id = :eid"),
+            {"slot": str(target_time_slot_id), "eid": str(entry.id)},
+        )
+        db.expire(existing)
+        db.expire(entry)
+
+        change_existing = ScheduleChange(
+            schedule_version_id=version_id,
+            change_type=ChangeType.SWAP,
+            entry_id=existing.id,
+            previous_values={"time_slot_id": str(target_time_slot_id)},
+            new_values={"time_slot_id": str(old_slot)},
+            source="manual",
+            description=f"Moved to vacated slot (swap triggered by move of entry {entry_id})",
+            created_by_id=user_id,
+        )
+        db.add(change_existing)
+
+        change_entry = ScheduleChange(
+            schedule_version_id=version_id,
+            change_type=ChangeType.SWAP,
+            entry_id=entry.id,
+            previous_values={"time_slot_id": str(old_slot)},
+            new_values={"time_slot_id": str(target_time_slot_id)},
+            source="manual",
+            description=f"Moved entry to target slot (swapped with entry {existing.id})",
+            created_by_id=user_id,
+        )
+        db.add(change_entry)
+    else:
+        # Simple move
+        entry.time_slot_id = target_time_slot_id
+
+        change = ScheduleChange(
+            schedule_version_id=version_id,
+            change_type=ChangeType.REASSIGN,
+            entry_id=entry.id,
+            previous_values={"time_slot_id": str(old_slot)},
+            new_values={"time_slot_id": str(target_time_slot_id)},
+            source="manual",
+            description="Moved entry to empty time slot",
+            created_by_id=user_id,
+        )
+        db.add(change)
+
+    db.flush()
+
+    # Re-run conflict detection
+    version = db.query(ScheduleVersion).filter(ScheduleVersion.id == version_id).first()
+    all_conflicts, entries = _run_conflict_detection_for_version(version, db)
+    errors, warnings = _update_version_and_entry_conflicts(version, all_conflicts, entries, db)
+
+    db.commit()
+
+    entry_reads = get_schedule_entries(version_id=version_id, db=db)
+    return SwapMoveResult(entries=entry_reads, conflicts=errors, warnings=warnings)
 
 
 # ---------------------------------------------------------------------------

@@ -122,3 +122,26 @@ class ValidationResult(BaseModel):
     valid: bool
     conflicts: list[ConflictDetail] = Field(default_factory=list)
     warnings: list[ConflictDetail] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Swap / Move
+# ---------------------------------------------------------------------------
+
+class SwapEntriesRequest(BaseModel):
+    """Swap two entries in the same schedule version."""
+    entry_id_a: UUID
+    entry_id_b: UUID
+
+
+class MoveEntryRequest(BaseModel):
+    """Move an entry to a different time slot (possibly empty)."""
+    entry_id: UUID
+    target_time_slot_id: UUID
+
+
+class SwapMoveResult(BaseModel):
+    """Response for swap and move operations."""
+    entries: list[ScheduleEntryRead] = Field(default_factory=list)
+    conflicts: list[ConflictDetail] = Field(default_factory=list)
+    warnings: list[ConflictDetail] = Field(default_factory=list)

@@ -224,6 +224,21 @@ export function exportScheduleExcel(projectId, versionId) {
   return apiDownload(`/projects/${projectId}/schedules/${versionId}/export`, {}, `horario_v${versionId}.xlsx`)
 }
 
+// --- Schedule Swap / Move ---
+export function swapScheduleEntries(projectId, versionId, entryIdA, entryIdB) {
+  return api(`/projects/${projectId}/schedules/${versionId}/swap`, {
+    method: 'POST',
+    body: JSON.stringify({ entry_id_a: entryIdA, entry_id_b: entryIdB }),
+  })
+}
+
+export function moveScheduleEntry(projectId, versionId, entryId, targetTimeSlotId) {
+  return api(`/projects/${projectId}/schedules/${versionId}/move`, {
+    method: 'POST',
+    body: JSON.stringify({ entry_id: entryId, target_time_slot_id: targetTimeSlotId }),
+  })
+}
+
 // --- Assistant ---
 export function sendAssistantMessage(projectId, content, scheduleVersionId) {
   return api(`/projects/${projectId}/assistant/chat`, {

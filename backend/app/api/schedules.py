@@ -13,14 +13,19 @@ from app.db.models import ScheduleChange, ScheduleVersion
 from app.schemas.schedule import (
     GenerateScheduleRequest,
     GenerateScheduleResponse,
+    MoveEntryRequest,
     ScheduleChangeRead,
     ScheduleEntryRead,
     ScheduleVersionRead,
+    SwapEntriesRequest,
+    SwapMoveResult,
     ValidationResult,
 )
 from app.services.schedule_service import (
     generate_schedule,
     get_schedule_entries,
+    move_entry_to_slot,
+    swap_entries,
     validate_schedule,
 )
 
@@ -142,6 +147,76 @@ def list_entries(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid section_id")
 
     return get_schedule_entries(version_id=vid, db=db, section_id=sid)
+
+
+# ---------------------------------------------------------------------------
+# Swap / Move
+# ---------------------------------------------------------------------------
+
+@router.post("/schedules/{version_id}/swap", response_model=SwapMoveResult)
+def swap(
+    project_id: str,
+    version_id: str,
+    body: SwapEntriesRequest,
+    db: DbSession,
+    current_user: CurrentUser,
+):
+    """Swap the time slots of two entries in a schedule version."""
+    project = get_project_for_user(db, project_id, current_user)
+
+    try:
+        vid = UUID(version_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule version not found")
+
+    version = (
+        db.query(ScheduleVersion)
+        .filter(ScheduleVersion.id == vid, ScheduleVersion.project_id == project.id)
+        .first()
+    )
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule version not found")
+
+    return swap_entries(
+        version_id=vid,
+        entry_id_a=body.entry_id_a,
+        entry_id_b=body.entry_id_b,
+        db=db,
+        user_id=current_user.id,
+    )
+
+
+@router.post("/schedules/{version_id}/move", response_model=SwapMoveResult)
+def move(
+    project_id: str,
+    version_id: str,
+    body: MoveEntryRequest,
+    db: DbSession,
+    current_user: CurrentUser,
+):
+    """Move an entry to a different time slot, swapping if the slot is occupied."""
+    project = get_project_for_user(db, project_id, current_user)
+
+    try:
+        vid = UUID(version_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule version not found")
+
+    version = (
+        db.query(ScheduleVersion)
+        .filter(ScheduleVersion.id == vid, ScheduleVersion.project_id == project.id)
+        .first()
+    )
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule version not found")
+
+    return move_entry_to_slot(
+        version_id=vid,
+        entry_id=body.entry_id,
+        target_time_slot_id=body.target_time_slot_id,
+        db=db,
+        user_id=current_user.id,
+    )
 
 
 # ---------------------------------------------------------------------------
