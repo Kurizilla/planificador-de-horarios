@@ -314,7 +314,7 @@ class CPSatSchedulePlanner(SchedulePlanner):
         # Identify subject indices for LEN, MAT, RE_LEN, RE_MAT
         first_slot_penalty_subjs = set()
         for sj_i, subj in enumerate(subjects):
-            if subj.code in ("LEN", "MAT"):
+            if subj.code in ("LEN", "MAT", "RE_LEN", "RE_MAT"):
                 first_slot_penalty_subjs.add(sj_i)
 
         # Find the first slot index for each day (slot_order == 1)
