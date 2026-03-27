@@ -1,0 +1,151 @@
+# Cloud Build: construye backend y frontend, push a Artifact Registry y deploy a Cloud Run.
+# Uso (obligatorio --region en 2.ª gen; sin región puede dar NOT_FOUND):
+#   gcloud builds submit . --config=cloudbuild.yaml --region=us-east1
+# O conecta el repo a Cloud Build y crea un trigger (push a main).
+#
+# Sustituciones (en trigger o --substitutions):
+#   _REGION: región (Artifact Registry, Cloud Run). Default us-east1.
+#   _REPOSITORY: nombre del repo de imágenes. Default scheduler.
+#   _VITE_API_URL: URL pública del backend en build time (ej. https://scheduler-backend-xxx.run.app/api/v1).
+#                  Obligatorio para prod: configurar en el trigger.
+#   _BACKEND_SERVICE, _FRONTEND_SERVICE: nombres de servicios Cloud Run.
+#   _CLOUD_SQL_INSTANCE_NAME: nombre de la instancia Cloud SQL (default supervisor-ia).
+#   _CORS_ORIGINS: URL del frontend para CORS (ej. https://scheduler-frontend-xxx.run.app).
+#   _SERVICE_ACCOUNT_SUFFIX: sufijo de la cuenta de servicio (default educacion-svc-dev).
+#   PROJECT_ID: built-in; se usa en pasos para bucket y Cloud SQL.
+
+substitutions:
+  _REGION: us-east1
+  _REPOSITORY: scheduler
+  _VITE_API_URL: "https://scheduler-backend-518959659589.us-east1.run.app/api/v1"
+  _BACKEND_SERVICE: scheduler-backend
+  _FRONTEND_SERVICE: scheduler-frontend
+  _CLOUD_SQL_INSTANCE_NAME: supervisor-ia
+  _CORS_ORIGINS: "https://scheduler-frontend-518959659589.us-east1.run.app"
+  _SERVICE_ACCOUNT_SUFFIX: educacion-svc-dev
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  # --- Build: backend (contexto = raíz del repo: backend/ + src/) ---
+  - name: gcr.io/cloud-builders/docker
+    id: build-backend
+    args:
+      - build
+      - --platform
+      - linux/amd64
+      - -f
+      - backend/Dockerfile
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/backend:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/backend:latest
+      - .
+
+  # --- Build: frontend (VITE_API_URL se embebe en el build) ---
+  - name: gcr.io/cloud-builders/docker
+    id: build-frontend
+    args:
+      - build
+      - --platform
+      - linux/amd64
+      - -f
+      - frontend/Dockerfile
+      - --build-arg
+      - VITE_API_URL=${_VITE_API_URL}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/frontend:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/frontend:latest
+      - .
+
+  # --- Push: necesario para que el deploy use las imágenes (images: se hace al final) ---
+  - name: gcr.io/cloud-builders/docker
+    id: push-backend
+    waitFor: ["build-backend"]
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/backend:${SHORT_SHA}
+  - name: gcr.io/cloud-builders/docker
+    id: push-backend-latest
+    waitFor: ["push-backend"]
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/backend:latest
+  - name: gcr.io/cloud-builders/docker
+    id: push-frontend
+    waitFor: ["build-frontend"]
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/frontend:${SHORT_SHA}
+  - name: gcr.io/cloud-builders/docker
+    id: push-frontend-latest
+    waitFor: ["push-frontend"]
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/frontend:latest
+
+  # --- Deploy: backend a Cloud Run (Cloud SQL, Secret Manager, GCS) ---
+  # Cloud SQL, bucket y service account usan PROJECT_ID en el paso (sí se expande ahí).
+  - name: gcr.io/google.com/cloudsdktool/google-cloud-cli
+    id: deploy-backend
+    waitFor: ["push-backend-latest"]
+    entrypoint: gcloud
+    args:
+      - beta
+      - run
+      - deploy
+      - ${_BACKEND_SERVICE}
+      - --image
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/backend:latest
+      - --region
+      - ${_REGION}
+      - --port
+      - "8000"
+      - --service-account
+      - ${_SERVICE_ACCOUNT_SUFFIX}@${PROJECT_ID}.iam.gserviceaccount.com
+      - --no-cpu-throttling
+      - --add-cloudsql-instances
+      - ${PROJECT_ID}:${_REGION}:${_CLOUD_SQL_INSTANCE_NAME}
+      - --set-secrets
+      - "JWT_SECRET=jwt-secret-scheduler:latest,XAI_API_KEY=xai-api-key:latest,DATABASE_URL=database-url-scheduler:1"
+      - --set-env-vars
+      - "STORAGE_ROOT=/data,CORS_ORIGINS=${_CORS_ORIGINS}"
+      - --memory
+      - 2Gi
+      - --cpu
+      - "2"
+      - --timeout
+      - "3600"
+      - --add-volume
+      - name=storage,type=cloud-storage,bucket=scheduler-artifacts-${PROJECT_ID}
+      - --add-volume-mount
+      - volume=storage,mount-path=/data
+      - --allow-unauthenticated
+
+  # --- Deploy: frontend a Cloud Run ---
+  - name: gcr.io/google.com/cloudsdktool/google-cloud-cli
+    id: deploy-frontend
+    waitFor: ["push-frontend-latest"]
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_FRONTEND_SERVICE}
+      - --image
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/frontend:latest
+      - --region
+      - ${_REGION}
+      - --port
+      - "80"
+      - --service-account
+      - ${_SERVICE_ACCOUNT_SUFFIX}@${PROJECT_ID}.iam.gserviceaccount.com
+      - --allow-unauthenticated
+
+# Push de imágenes al final (además del push explícito, para que queden registradas)
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/backend:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/backend:latest
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/frontend:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/frontend:latest

@@ -1,0 +1,63 @@
+# Schedule Planner — stack completo para desarrollo local
+# Solo para desarrollo en tu máquina. En producción no se usa este archivo (deploy con Makefile/Cloud Run).
+# Uso: cp env.example .env (opcional, configurar XAI_API_KEY)
+#       docker compose up -d
+# Para empezar de cero (borrar datos de Postgres): docker compose down -v && docker compose up -d
+# Frontend: http://localhost:3000
+# Backend API: http://localhost:8000  (docs: http://localhost:8000/docs)
+
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: scheduler
+      POSTGRES_PASSWORD: scheduler
+      POSTGRES_DB: scheduler
+    ports:
+      - "5432:5432"
+    volumes:
+      - scheduler_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scheduler -d scheduler"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://scheduler:scheduler@db:5432/scheduler
+      STORAGE_ROOT: /data
+      JWT_SECRET: change-me-in-production
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      # Orígenes permitidos en local (frontend 3000, Vite dev 5173/5174; localhost y 0.0.0.0)
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000,http://0.0.0.0:3000,http://localhost:5173,http://127.0.0.1:5173,http://0.0.0.0:5173,http://localhost:5174,http://127.0.0.1:5174,http://0.0.0.0:5174
+      # Valores por defecto solo para dev local; en producción definir .env o variables en Cloud Run.
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@example.com}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-secure-password}
+      SEED_ADMIN_NAME: ${SEED_ADMIN_NAME:-Admin}
+    volumes:
+      - scheduler_backend_data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # Desde el navegador (host) el backend se ve en localhost:8000
+        VITE_API_URL: http://localhost:8000/api/v1
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  scheduler_postgres_data:   # Borrar con: docker compose down -v
+  scheduler_backend_data:

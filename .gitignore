@@ -1,0 +1,56 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# Claude
+claude-venv/
+.claude/
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+
+# Environment variables
+.env
+.env.local
+
+# IDEs
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+
+# SQLite DB (generated at runtime)
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+frontend/dist/
+
+# Data (uploaded files)
+backend/data/
+
+# Build
+*.egg-info/
+dist/
+build/

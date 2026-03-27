@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+*.csv
+*.json
+*.log
+*.txt
+#*.md
+*.yaml
+!cloudbuild.yaml
+*.yml
+!docker-compose.yml
+*.xml

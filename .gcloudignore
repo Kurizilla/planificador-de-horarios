@@ -1,0 +1,51 @@
+# Cloud Build: excluir del contexto que se sube con gcloud builds submit.
+# Si no existe, gcloud usa .gitignore (solo el de la raíz); node_modules y
+# otros no estarían ignorados. Ver https://cloud.google.com/build/docs/support/ignore-files
+
+# Dependencias (se instalan en el build)
+node_modules/
+frontend/node_modules/
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+.Python
+
+# Entorno y secretos (nunca subir)
+.env
+.env.*
+!.env.example
+
+# Datos locales y generados
+outputs/*
+!outputs/.gitkeep
+logs/
+checkpoints/
+*.db
+backend/storymap.db
+inputs/
+
+# Frontend build (se genera en el contenedor)
+frontend/dist/
+frontend/dist-ssr/
+
+# IDE y OS
+.vscode/
+.idea/
+.cursor/
+.DS_Store
+*.swp
+*.swo
+
+# Git (opcional: quitarlo si quieres que SHORT_SHA venga del repo)
+# .git/
+
+# Notebooks y checkpoints (no necesarios para backend/frontend)
+.ipynb_checkpoints/
+*.ipynb

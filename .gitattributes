@@ -1,0 +1,2 @@
+# Shell scripts: siempre LF (evita "exec format error" en Linux/Cloud Run)
+*.sh text eol=lf
