@@ -29,6 +29,77 @@ function conflictText(flags) {
   return flags.map(f => CONFLICT_LABELS[f]?.text || f).join('\n')
 }
 
+function conflictExplanation(entry) {
+  if (!entry?.conflict_flags?.length) return []
+  const day = DAY_NAMES[entry.day_of_week] || '?'
+  const subj = entry.subject_name || entry.subject_code || '?'
+  const teacher = entry.teacher_name || '?'
+  const hora = entry.start_time?.slice(0, 5) || '?'
+
+  return entry.conflict_flags.map(flag => {
+    const sev = CONFLICT_LABELS[flag]?.severity || 'error'
+    let msg = CONFLICT_LABELS[flag]?.text || flag
+    switch (flag) {
+      case 'subject_repeated_same_day':
+        msg = `"${subj}" aparece más de una vez el ${day} en esta sección. Cada materia solo debe asignarse una vez por día.`
+        break
+      case 'teacher_double_booking':
+        msg = `${teacher} está asignado/a a otra sección en este mismo bloque (${day} ${hora}). Un docente no puede estar en dos aulas al mismo tiempo.`
+        break
+      case 'section_double_booking':
+        msg = `Esta sección tiene dos materias asignadas al mismo tiempo (${day} ${hora}). Solo puede haber una clase por bloque.`
+        break
+      case 'len_mat_first_slot':
+        msg = `"${subj}" está en la primera hora del ${day} (${hora}). Se recomienda no asignar Lenguaje ni Matemática en el primer bloque del día.`
+        break
+      case 'teacher_max_hours_exceeded':
+        msg = `${teacher} tiene más horas asignadas de las permitidas en su carga semanal.`
+        break
+    }
+    return { severity: sev, message: msg }
+  })
+}
+
+function ConflictPopover({ entry, onClose }) {
+  const explanations = conflictExplanation(entry)
+  if (!explanations.length) return null
+
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        position: 'absolute', top: '100%', right: 0, zIndex: 100,
+        background: 'var(--color-bg)', border: '1px solid var(--color-border)',
+        borderRadius: 10, boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+        padding: '0.75rem', minWidth: 260, maxWidth: 320,
+        marginTop: 4, fontSize: '0.82rem', lineHeight: 1.5,
+        color: 'var(--color-text)',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+        <strong style={{ fontSize: '0.85rem' }}>
+          {explanations.some(e => e.severity === 'error') ? 'Conflicto' : 'Advertencia'}
+        </strong>
+        <button
+          onClick={onClose}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)', fontSize: '1rem', padding: '0 4px' }}
+        >x</button>
+      </div>
+      {explanations.map((exp, i) => (
+        <div key={i} style={{
+          padding: '0.5rem 0.6rem', borderRadius: 6, marginBottom: i < explanations.length - 1 ? '0.4rem' : 0,
+          background: exp.severity === 'error'
+            ? 'color-mix(in srgb, #E74C3C 10%, var(--color-bg))'
+            : 'color-mix(in srgb, #F39C12 10%, var(--color-bg))',
+          borderLeft: `3px solid ${exp.severity === 'error' ? '#E74C3C' : '#F39C12'}`,
+        }}>
+          {exp.message}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 const SUBJECT_COLORS = {
   LEN: '#4A90D9', MAT: '#E74C3C', CIE: '#2ECC71', SOC: '#F39C12',
   ART: '#9B59B6', EDF: '#95A5A6', ING: '#1ABC9C', RE_LEN: '#85C1E9', RE_MAT: '#F1948A',
@@ -90,6 +161,7 @@ function ScheduleGrid({ entries, viewMode, projectId, versionId, onEntriesChange
   const [dragOverCell, setDragOverCell] = useState(null)
   const [movingCell, setMovingCell] = useState(null)
   const [justDroppedCells, setJustDroppedCells] = useState(new Set())
+  const [conflictPopoverEntryId, setConflictPopoverEntryId] = useState(null)
 
   const isDragEnabled = viewMode === 'section' && !!projectId && !!versionId && !!onEntriesChanged
 
@@ -301,7 +373,16 @@ function ScheduleGrid({ entries, viewMode, projectId, versionId, onEntriesChange
                         transition: 'opacity 0.2s ease',
                     }}>
                       {hasConflict && (
-                        <span style={{ position: 'absolute', top: -2, right: -2, fontSize: '0.6rem', background: borderColor, color: '#fff', borderRadius: '50%', width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, cursor: 'help', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} title={conflictText(entry.conflict_flags)}>{severity === 'warning' ? '⚠' : '!'}</span>
+                        <>
+                          <span
+                            onClick={(e) => { e.stopPropagation(); setConflictPopoverEntryId(conflictPopoverEntryId === entry.id ? null : entry.id) }}
+                            style={{ position: 'absolute', top: -2, right: -2, fontSize: '0.6rem', background: borderColor, color: '#fff', borderRadius: '50%', width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, cursor: 'pointer', boxShadow: '0 1px 3px rgba(0,0,0,0.3)', zIndex: 2 }}
+                            title="Click para ver detalle"
+                          >{severity === 'warning' ? '⚠' : '!'}</span>
+                          {conflictPopoverEntryId === entry.id && (
+                            <ConflictPopover entry={entry} onClose={() => setConflictPopoverEntryId(null)} />
+                          )}
+                        </>
                       )}
                       {entry.is_locked && (
                         <span style={{ position: 'absolute', top: 1, left: 3, fontSize: '0.6rem' }} title="Bloqueado">L</span>
