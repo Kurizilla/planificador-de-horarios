@@ -10,6 +10,19 @@ import ScheduleAssistantWidget from '../components/ScheduleAssistantWidget'
 const DAY_NAMES = ['Lunes', 'Martes', 'Miercoles', 'Jueves', 'Viernes']
 // day_of_week comes as int from API: 0=Mon, 1=Tue, etc.
 
+const CONFLICT_LABELS = {
+  teacher_double_booking: 'Docente asignado a otra sección al mismo tiempo',
+  section_double_booking: 'Sección con dos materias en el mismo bloque',
+  teacher_max_hours_exceeded: 'Docente excede su carga horaria máxima',
+  subject_repeated_same_day: 'Materia repetida en el mismo día',
+  len_mat_first_slot: 'Lenguaje o Matemática en la primera hora',
+}
+
+function conflictText(flags) {
+  if (!flags || flags.length === 0) return ''
+  return flags.map(f => CONFLICT_LABELS[f] || f).join('\n')
+}
+
 const SUBJECT_COLORS = {
   LEN: '#4A90D9', MAT: '#E74C3C', CIE: '#2ECC71', SOC: '#F39C12',
   ART: '#9B59B6', EDF: '#95A5A6', ING: '#1ABC9C', RE_LEN: '#85C1E9', RE_MAT: '#F1948A',
@@ -280,7 +293,7 @@ function ScheduleGrid({ entries, viewMode, projectId, versionId, onEntriesChange
                         transition: 'opacity 0.2s ease',
                     }}>
                       {hasConflict && (
-                        <span style={{ position: 'absolute', top: 1, right: 3, fontSize: '0.65rem' }} title={entry.conflict_flags.join(', ')}>!</span>
+                        <span style={{ position: 'absolute', top: -2, right: -2, fontSize: '0.6rem', background: '#E74C3C', color: '#fff', borderRadius: '50%', width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, cursor: 'help', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} title={conflictText(entry.conflict_flags)}>!</span>
                       )}
                       {entry.is_locked && (
                         <span style={{ position: 'absolute', top: 1, left: 3, fontSize: '0.6rem' }} title="Bloqueado">L</span>
