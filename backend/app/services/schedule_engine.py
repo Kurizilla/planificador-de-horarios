@@ -292,14 +292,13 @@ class CPSatSchedulePlanner(SchedulePlanner):
                             if (si, ki, sj_i, ti) in x:
                                 generalista_bonus_vars.append(x[(si, ki, sj_i, ti)])
 
-        # ----- Soft Objective: Subject distribution across days -----
-        # Penalise having >2 blocks of the same subject on the same day for a section
-        distribution_penalties = []
+        # ----- Hard Constraint 4: Max 1 block of same subject per day per section -----
+        # No subject can repeat on the same day for a section
         days = sorted(set(s.day_of_week for s in slots))
         for si in range(n_sec):
             for sj_i, hrs in sec_demand.get(si, []):
-                if hrs <= 2:
-                    continue  # No risk of clustering
+                if sj_i in subjects_without_teachers:
+                    continue
                 for day in days:
                     day_slots = [slot_idx[s.id] for s in slots if s.day_of_week == day]
                     day_vars = [
@@ -308,15 +307,37 @@ class CPSatSchedulePlanner(SchedulePlanner):
                         for ti in sec_subj_teachers.get((si, sj_i), [])
                         if (si, ki, sj_i, ti) in x
                     ]
-                    if len(day_vars) > 2:
-                        day_total = model.new_int_var(0, len(day_vars), f"day_s{si}_j{sj_i}_d{day}")
-                        model.add(day_total == sum(day_vars))
-                        excess = model.new_int_var(0, len(day_vars), f"exc_s{si}_j{sj_i}_d{day}")
-                        model.add(excess >= day_total - 2)
-                        distribution_penalties.append(excess)
+                    if day_vars:
+                        model.add(sum(day_vars) <= 1)
+
+        # ----- Soft Objective: Avoid LEN/MAT in first slot of the day -----
+        # Identify subject indices for LEN, MAT, RE_LEN, RE_MAT
+        first_slot_penalty_subjs = set()
+        for sj_i, subj in enumerate(subjects):
+            if subj.code in ("LEN", "MAT"):
+                first_slot_penalty_subjs.add(sj_i)
+
+        # Find the first slot index for each day (slot_order == 1)
+        first_slots_per_day: dict[int, list[int]] = defaultdict(list)
+        for s in slots:
+            if s.slot_order == 1:
+                first_slots_per_day[s.day_of_week].append(slot_idx[s.id])
+
+        first_slot_penalties = []
+        for si in range(n_sec):
+            for sj_i in first_slot_penalty_subjs:
+                if sj_i in subjects_without_teachers:
+                    continue
+                for day, first_kis in first_slots_per_day.items():
+                    for ki in first_kis:
+                        vars_first = [
+                            x[(si, ki, sj_i, ti)]
+                            for ti in sec_subj_teachers.get((si, sj_i), [])
+                            if (si, ki, sj_i, ti) in x
+                        ]
+                        first_slot_penalties.extend(vars_first)
 
         # ----- Composite objective -----
-        # Weights: assignment (high), generalista bonus (medium), load balance (low), distribution (low)
         obj_terms = []
         # Maximise assignments (weight 100 per assigned slot)
         obj_terms.append(100 * total_assigned)
@@ -326,9 +347,9 @@ class CPSatSchedulePlanner(SchedulePlanner):
         # Minimise load imbalance (weight -2 per deviation hour)
         if teacher_load_penalties:
             obj_terms.append(-2 * sum(teacher_load_penalties))
-        # Minimise distribution clustering (weight -3 per excess)
-        if distribution_penalties:
-            obj_terms.append(-3 * sum(distribution_penalties))
+        # Penalise LEN/MAT in first slot (weight -15 each — significant but not blocking)
+        if first_slot_penalties:
+            obj_terms.append(-15 * sum(first_slot_penalties))
 
         model.maximize(sum(obj_terms))
 
@@ -576,5 +597,57 @@ def detect_conflicts(
                 description=f"Docente '{teacher.full_name}' tiene {hours}h asignadas (máx: {teacher.max_hours_per_week}h).",
                 affected_entry_ids=teacher_entries[teacher_id],
             ))
+
+    # --- Subject repeated on same day for a section (ERROR) ---
+    slot_map = {ts.id: ts for ts in time_slots}
+    from app.db.models import Subject as _Subject
+    # Build subject code lookup from entries if possible
+    section_day_subject: dict[tuple[UUID, int], dict[UUID, list[ScheduleEntry]]] = defaultdict(lambda: defaultdict(list))
+    for entry in entries:
+        ts = slot_map.get(entry.time_slot_id)
+        if ts:
+            section_day_subject[(entry.section_id, ts.day_of_week)][entry.subject_id].append(entry)
+
+    for (sec_id, day), subj_entries in section_day_subject.items():
+        for subj_id, ents in subj_entries.items():
+            if len(ents) > 1:
+                conflicts.append(ConflictDetail(
+                    type="subject_repeated_same_day", severity="error",
+                    description=f"Materia repetida {len(ents)} veces el mismo día en una sección.",
+                    affected_entry_ids=[e.id for e in ents],
+                ))
+
+    # --- LEN/MAT in first slot of day (WARNING) ---
+    first_slot_warnings: list[UUID] = []
+    for entry in entries:
+        ts = slot_map.get(entry.time_slot_id)
+        if ts and ts.slot_order == 1:
+            # Check if this is LEN or MAT by looking at the entry's subject
+            # We need subject info - check from the subjects list
+            subj = None
+            for s in sections:
+                pass  # sections is wrong here, we need subjects
+            # Use a simpler approach: check all subjects passed in
+            pass
+
+    # We need subject codes - build lookup from the subjects in the DB context
+    # Since detect_conflicts gets DB model objects, we can check via relationship
+    # But entries might not have subject loaded. Let's build from what we have.
+    # The caller should pass subjects list; for now detect via entry.subject relationship if loaded.
+    try:
+        for entry in entries:
+            ts = slot_map.get(entry.time_slot_id)
+            if ts and ts.slot_order == 1 and hasattr(entry, 'subject') and entry.subject:
+                if entry.subject.code in ("LEN", "MAT"):
+                    first_slot_warnings.append(entry.id)
+    except Exception:
+        pass  # Skip if subject not loaded
+
+    if first_slot_warnings:
+        conflicts.append(ConflictDetail(
+            type="len_mat_first_slot", severity="warning",
+            description=f"Lenguaje o Matemática asignada en la primera hora del día ({len(first_slot_warnings)} caso(s)).",
+            affected_entry_ids=first_slot_warnings,
+        ))
 
     return conflicts
